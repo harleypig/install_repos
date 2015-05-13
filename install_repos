@@ -3,17 +3,77 @@
 # XXX: Add checks or workarounds for required programs (e.g., yum-config-manager).
 # XXX: Add checks for existing keys to import_key.
 # XXX: Add checks for existing rpms to install_rpm, or rpms needing updates.
+# XXX: Remove handling specific to old internal setup.
+# XXX: Add bash version check.
 
+BASENAME=$(basename $0)
+LOGFILE="${BASENAME}.log"
+NOTREALLY=
+EXCLUDE=
+
+# Does getopt exist and is it the one we expect?
+#   No? Fail.
+
+GETOPT=$(command -v getopt)
+
+if [[ -z $GETOPT ]]; then
+  echo $BASENAME depends on the 'getopt' program.
+  exit 1
+fi
+
+$GETOPT -T
+
+if [[ $? -ne 4 ]]; then
+  echo $BASENAME depends on a new version of GETOPT, or unset GETOPT_COMPATIBLE.
+  exit 1
+fi
+
+GETOPT_PARM="${GETOPT_PARM} --alternative"
+GETOPT_PARM="${GETOPT_PARM} --options h,l,a,n"
+GETOPT_PARM="${GETOPT_PARM} --longoptions help,list,all"
+GETOPT_PARM="${GETOPT_PARM} --name $BASENAME"
+
+function usage {
+  cat <<USAGE
+
+Usage:
+  $BASENAME -l|--list
+    List known repository names.
+
+  $BASENAME -n repo1 repo2
+    Install specified repositories.
+    If -n is included then don't really install, just show what would have been done.
+
+  $BASENAME -n -a|--all [repo1 repo2]
+    Install all known repositories. Any repositories listed will not be installed.
+    If -n is included then don't really install, just show what would have been done.
+
+  $BASENAME -h|--help
+    This help text.
+
+USAGE
+}
+
+[[ "$#" == 0 ]] && usage && exit 1
+  
 function logit {
-  echo "> $@"
+  echo "> $@" >> $LOGFILE
 }
 
 function runit {
   logit "$@"
-  "$@"
+  $NOTREALLY "$@" 2>&1 >> $LOGFILE
 }
 
-export -f logit
+function known_repos {
+  grep '^function repo_' $0 | cut -d ' ' -f 2 | cut -d '_' -f 2 | sort
+}
+
+function show_repos {
+  echo -e "\nKnown Repositories:\n"
+  for r in $(known_repos); do echo "  ${r}"; done
+  echo
+}
 
 BASE_URL=${BASE_URL:-http://vr.vwh.net}
 FILES_URL=${FILES_URL:-$BASE_URL/files}
@@ -35,7 +95,7 @@ function _munge_args {
 
 }
 
-function download_file () {
+function download_file {
 
   URL=$1
   LOC=$2
@@ -50,7 +110,7 @@ function download_file () {
 # parameter. Everything up to the last parameter will be passed to rpm as
 # options.
 
-function import_key () {
+function import_key {
 
   _munge_args "$@"
 
@@ -61,6 +121,9 @@ function import_key () {
   logit "Importing $URL ..."
   runit rpm $_argv --import $LOC
   runit rm $LOC
+  
+  # Get rid of the warning about the rpmdb being modified outside of yum.
+  yum clean all > /dev/null
 
 }
 
@@ -68,7 +131,7 @@ function import_key () {
 # parameter. Everything up to the last parameter will be passed to rpm as
 # options.
 
-function install_rpm () {
+function install_rpm {
 
   _munge_args "$@"
 
@@ -80,44 +143,48 @@ function install_rpm () {
   runit rpm $_argv -Uvh $LOC
   runit rm -f $LOC
 
+  # Get rid of the warning about the rpmdb being modified outside of yum.
+  yum clean all > /dev/null
+
 }
 
-function repo_centos () {
+# XXX: Not sure this should be included ... 
+#function repo_centos {
+#
+#  if [ "x$RELEASEVER" == 'x5' ]; then
+#
+#    base_key_file='RPM-GPG-KEY-CentOS-'
+#    base_key_url="http://${BASE_URL}/mirrors/centos/${base_key_file}"
+#
+#    for key in $(seq 3 $RELEASEVER) Security-5; do
+#
+#      import_key "${base_key_url}${key}"
+#
+#    done
+#
+#    URL="$FILES_URL/repo/vmware/CentOS-Base.repo"
+#    LOC="$_workdir/$(basename $URL)"
+#
+#    download_file $URL $LOC
+#
+#  else
+#
+#    URL='http://mirrors.xmission.com/centos'
+#
+#    # Install CentOS keys
+#    for key in $(seq 3 $RELEASEVER) Security-6; do
+#
+#      import_key ${URL}/RPM-GPG-KEY-CentOS-$key
+#
+#    done
+#
+#    # Enable CentOS plus and contrib repos
+#    runit yum-config-manager --enable centosplus contrib
+#
+#  fi
+#}
 
-  if [ "x$RELEASEVER" == 'x5' ]; then
-
-    base_key_file='RPM-GPG-KEY-CentOS-'
-    base_key_url="http://${BASE_URL}/mirrors/centos/${base_key_file}"
-
-    for key in $(seq 3 $RELEASEVER) Security-5; do
-
-      import_key "${base_key_url}${key}"
-
-    done
-
-    URL="$FILES_URL/repo/vmware/CentOS-Base.repo"
-    LOC="$_workdir/$(basename $URL)"
-
-    download_file $URL $LOC
-
-  else
-
-    URL='http://mirrors.xmission.com/centos'
-
-    # Install CentOS keys
-    for key in $(seq 3 $RELEASEVER) Security-6; do
-
-      import_key ${URL}/RPM-GPG-KEY-CentOS-$key
-
-    done
-
-    # Enable CentOS plus and contrib repos
-    runit yum-config-manager --enable centosplus contrib
-
-  fi
-}
-
-function repo_elrepo () {
+function repo_elrepo {
 
   # Import ElRepo's public key
   import_key http://elrepo.org/RPM-GPG-KEY-elrepo.org
@@ -135,35 +202,19 @@ function repo_elrepo () {
   # Install ElRepo's repo file.
   install_rpm $elrepo_rpm
 
-  if [ "x$RELEASEVER" == 'x5' ]; then
-
-    #XXX: convert this to use download_file
-    old_pwd=$PWD
-    cd /etc/yum.repos.d
-    curl -O $BASE_URL/files/repo/vmware/elrepo.repo
-    cd $old_pwd
-
-  else
-
-    runit yum-config-manager --enable elrepo elrepo-extras elrepo-kernel
-
-  fi
 }
 
-function repo_virtualbox () {
+function repo_virtualbox {
 
   # Import VirtualBox's public key
   import_key https://www.virtualbox.org/download/oracle_vbox.asc
 
-  # Download VirtualBox's repo file
-  URL='http://download.virtualbox.org/virtualbox/rpm/rhel/virtualbox.repo'
-  LOC="/etc/yum.repos.d/$(basename $URL)"
-
-  download_file $URL $LOC
+  # Install VirtualBox's repo file
+  runit yum-config-manager --add-repo http://download.virtualbox.org/virtualbox/rpm/rhel/virtualbox.repo
   
 }
 
-function repo_epel () {
+function repo_epel {
 
   # XXX: Look into http://rpms.famillecollet.com/
 
@@ -210,32 +261,18 @@ function repo_epel () {
   fi
 }
 
-XXX: Not going to install this one for awhile I think.
-function repo_openvz () {
+#XXX: Not going to install this one for awhile I think.
+function repo_openvz {
 
   # Import OpenVZ's public key
   import_key http://download.openvz.org/RPM-GPG-Key-OpenVZ
 
-  if [ "x$RELEASEVER" == 'x5' ]; then
+  # Install OpenVZ's repo file.
+  runit yum-config-manager --add-repo http://download.openvz.org/openvz.repo
 
-    #XXX: convert this to use download_file
-    old_pwd=$PWD
-    cd /etc/yum.repos.d
-
-    # Install our OpenVZ repo file.
-    curl -sSLO $BASE_URL/files/repo/vmware/openvz.repo
-
-    cd $old_pwd
-
-  else
-
-    # Install OpenVZ's repo file.
-    runit yum-config-manager --add-repo http://download.openvz.org/openvz.repo
-
-  fi
 }
 
-function repo_rpmforge () {
+function repo_rpmforge {
 
   # Import Repoforge's public key
   import_key http://apt.sw.be/RPM-GPG-KEY.dag.txt
@@ -253,41 +290,59 @@ function repo_rpmforge () {
   # Install Repoforge's repo file.
   install_rpm $pkg
 
-  if [ "x$RELEASEVER" == 'x5' ]; then
+}
 
-    #XXX: convert this to use download_file
-    old_pwd=$PWD
-    cd /etc/yum.repos.d
-    curl -O $BASE_URL/files/repo/vmware/rpmforge.repo
-    cd $old_pwd
+function repo_jenkins {
+
+  import_key https://jenkins-ci.org/redhat/jenkins-ci.org.key
+  runit yum-config-manager --add-repo http://pkg.jenkins-ci.org/redhat-stable/jenkins.repo
+
+}
+
+function repo_mysql {
+
+  # XXX: mysql key?
+
+  URL='http://dev.mysql.com/get/mysql-community-release-el7-5.noarch.rpm'
+  install_rpm $URL
+
+}
+
+PARSED=$($GETOPT $GETOPT_PARM -- "$@")
+eval set -- "${PARSED}"
+
+while true ; do
+  case "$1" in
+    -h|--help) usage;                  exit 0 ;;
+    -l|--list) show_repos;             exit 0 ;;
+     -a|--all) EXCLUDE=1;              shift  ;;
+           -n) NOTREALLY=echo;         shift  ;;
+           --) shift;                  break  ;;
+            *) echo "Internal error!"; exit 1 ;;
+  esac
+done
+
+# ir repo1
+# ir repo1 repo2
+
+REPOS=$(echo "$@" | tr ' ' '|')
+
+for repo in $(known_repos); do
+
+  if [[ -n $EXCLUDE ]]; then
+
+    if [[ $repo == +($REPOS) ]]; then
+      logit "Skipping $repo ..."
+      continue
+    else
+      "repo_$repo"
+    fi
 
   else
 
-    runit yum-config-manager --enable rpmforge rpmforge-extras
+    if [[ $repo == +($REPOS) ]]; then
+      "repo_$repo"
+    fi
 
   fi
-}
-
-function repo_jenkins () {
-
-  import_key https://jenkins-ci.org/redhat/jenkins-ci.org.key
-
-  URL='http://pkg.jenkins-ci.org/redhat-stable/jenkins.repo'
-  LOC="/etc/yum.repos.d/$(basename $URL)"
-  download_file $URL $LOC
-
-}
-
-function repo_mysql () {
-
-  mysql='http://dev.mysql.com/get/mysql-community-release-el7-5.noarch.rpm'
-  install_rpm $mysql
-
-}
-
-# For now, we're just going to install everything by default.
-for repo in $(grep '^function repo_' $0 | cut -d ' ' -f 2); do
-
-  $repo
-
 done
