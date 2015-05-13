@@ -1,0 +1,293 @@
+#!/bin/bash
+
+# XXX: Add checks or workarounds for required programs (e.g., yum-config-manager).
+# XXX: Add checks for existing keys to import_key.
+# XXX: Add checks for existing rpms to install_rpm, or rpms needing updates.
+
+function logit {
+  echo "> $@"
+}
+
+function runit {
+  logit "$@"
+  "$@"
+}
+
+export -f logit
+
+BASE_URL=${BASE_URL:-http://vr.vwh.net}
+FILES_URL=${FILES_URL:-$BASE_URL/files}
+
+# What does yum think releasever is?
+RELEASEVER=$(python -c 'import yum; yb = yum.YumBase(); print yb.conf.yumvar["releasever"]' | grep -v Loaded)
+
+# What directory are we going to be doing temp work in?
+_workdir='/tmp'
+
+# Takes the last element from ARGV and puts it in _last.  The rest goes in
+# _argv.
+
+function _munge_args {
+
+  _argv=($@)
+  _last="${_argv[@]: -1}"
+  unset _argv[${#_argv[@]}-1]
+
+}
+
+function download_file () {
+
+  URL=$1
+  LOC=$2
+
+  logit
+  logit "Downloading $(basename $URL) ..."
+  runit curl -LSso $LOC $URL
+
+}
+
+# Expects a url to a key to be imported using 'rpm --import' as the *last*
+# parameter. Everything up to the last parameter will be passed to rpm as
+# options.
+
+function import_key () {
+
+  _munge_args "$@"
+
+  URL=$_last
+  LOC="$_workdir/$(basename $URL)"
+
+  download_file $URL $LOC
+  logit "Importing $URL ..."
+  runit rpm $_argv --import $LOC
+  runit rm $LOC
+
+}
+
+# Expects a url to an rpm to be installed using 'rpm -Uvh' as the *last*
+# parameter. Everything up to the last parameter will be passed to rpm as
+# options.
+
+function install_rpm () {
+
+  _munge_args "$@"
+
+  URL=$_last
+  LOC="$_workdir/$(basename $URL)"
+
+  download_file $URL $LOC
+  logit "Installing $LOC ..."
+  runit rpm $_argv -Uvh $LOC
+  runit rm -f $LOC
+
+}
+
+function repo_centos () {
+
+  if [ "x$RELEASEVER" == 'x5' ]; then
+
+    base_key_file='RPM-GPG-KEY-CentOS-'
+    base_key_url="http://${BASE_URL}/mirrors/centos/${base_key_file}"
+
+    for key in $(seq 3 $RELEASEVER) Security-5; do
+
+      import_key "${base_key_url}${key}"
+
+    done
+
+    URL="$FILES_URL/repo/vmware/CentOS-Base.repo"
+    LOC="$_workdir/$(basename $URL)"
+
+    download_file $URL $LOC
+
+  else
+
+    URL='http://mirrors.xmission.com/centos'
+
+    # Install CentOS keys
+    for key in $(seq 3 $RELEASEVER) Security-6; do
+
+      import_key ${URL}/RPM-GPG-KEY-CentOS-$key
+
+    done
+
+    # Enable CentOS plus and contrib repos
+    runit yum-config-manager --enable centosplus contrib
+
+  fi
+}
+
+function repo_elrepo () {
+
+  # Import ElRepo's public key
+  import_key http://elrepo.org/RPM-GPG-KEY-elrepo.org
+
+  case "$RELEASEVER" in
+
+    5) elrepo_rpm='http://elrepo.org/elrepo-release-5-4.el5.elrepo.noarch.rpm';;
+    6) elrepo_rpm='http://elrepo.org/elrepo-release-6-5.el6.elrepo.noarch.rpm';;
+    7) elrepo_rpm='http://elrepo.org/elrepo-release-7.0-2.el7.elrepo.noarch.rpm';;
+
+    *) echo "Don't know what to do with releasever $RELEASEVER";exit;;
+
+  esac
+
+  # Install ElRepo's repo file.
+  install_rpm $elrepo_rpm
+
+  if [ "x$RELEASEVER" == 'x5' ]; then
+
+    #XXX: convert this to use download_file
+    old_pwd=$PWD
+    cd /etc/yum.repos.d
+    curl -O $BASE_URL/files/repo/vmware/elrepo.repo
+    cd $old_pwd
+
+  else
+
+    runit yum-config-manager --enable elrepo elrepo-extras elrepo-kernel
+
+  fi
+}
+
+function repo_virtualbox () {
+
+  # Import VirtualBox's public key
+  import_key https://www.virtualbox.org/download/oracle_vbox.asc
+
+  # Download VirtualBox's repo file
+  URL='http://download.virtualbox.org/virtualbox/rpm/rhel/virtualbox.repo'
+  LOC="/etc/yum.repos.d/$(basename $URL)"
+
+  download_file $URL $LOC
+  
+}
+
+function repo_epel () {
+
+  # XXX: Look into http://rpms.famillecollet.com/
+
+  # Import EPEL's public keys
+  keys="${keys} FB4B18E6"
+  keys="${keys} BA094068"
+  keys="${keys} DE7F38BD"
+  keys="${keys} 0608B895"
+  keys="${keys} 217521F6"
+
+  for key in $keys; do
+
+    import_key "https://fedoraproject.org/static/${key}.txt"
+
+  done
+
+  case "$RELEASEVER" in
+
+    5) pkg='http://fedora-epel.mirror.lstn.net/5/x86_64/epel-release-5-4.noarch.rpm';;
+    6) pkg='http://download.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm';;
+    7) pkg='epel-release';;
+
+    *) echo "Don't know what to do with releasever $RELEASEVER";exit;;
+
+  esac
+
+  if [[ "x$pkg" -eq "xepel-release" ]]; then
+
+    runit yum -y install $pkg
+
+  else
+
+    # Install EPEL's repo file.
+    install_rpm $pkg
+
+    # If we are in rhel5 then we need to install python-hashlib so can understand
+    # hashes from packages on rhel6 servers.
+
+    if [ "x$RELEASEVER" == 'x5' ]; then
+
+      runit yum -y install python-hashlib
+
+    fi
+  fi
+}
+
+XXX: Not going to install this one for awhile I think.
+function repo_openvz () {
+
+  # Import OpenVZ's public key
+  import_key http://download.openvz.org/RPM-GPG-Key-OpenVZ
+
+  if [ "x$RELEASEVER" == 'x5' ]; then
+
+    #XXX: convert this to use download_file
+    old_pwd=$PWD
+    cd /etc/yum.repos.d
+
+    # Install our OpenVZ repo file.
+    curl -sSLO $BASE_URL/files/repo/vmware/openvz.repo
+
+    cd $old_pwd
+
+  else
+
+    # Install OpenVZ's repo file.
+    runit yum-config-manager --add-repo http://download.openvz.org/openvz.repo
+
+  fi
+}
+
+function repo_rpmforge () {
+
+  # Import Repoforge's public key
+  import_key http://apt.sw.be/RPM-GPG-KEY.dag.txt
+
+  case "$RELEASEVER" in
+
+    5) pkg='http://pkgs.repoforge.org/rpmforge-release/rpmforge-release-0.5.3-1.el5.rf.x86_64.rpm';;
+    6) pkg='http://pkgs.repoforge.org/rpmforge-release/rpmforge-release-0.5.3-1.el6.rf.x86_64.rpm';;
+    7) pkg='http://pkgs.repoforge.org/rpmforge-release/rpmforge-release-0.5.3-1.el7.rf.x86_64.rpm';;
+
+    *) echo "Don't know what to do with releasever $RELEASEVER"; exit;;
+
+  esac
+
+  # Install Repoforge's repo file.
+  install_rpm $pkg
+
+  if [ "x$RELEASEVER" == 'x5' ]; then
+
+    #XXX: convert this to use download_file
+    old_pwd=$PWD
+    cd /etc/yum.repos.d
+    curl -O $BASE_URL/files/repo/vmware/rpmforge.repo
+    cd $old_pwd
+
+  else
+
+    runit yum-config-manager --enable rpmforge rpmforge-extras
+
+  fi
+}
+
+function repo_jenkins () {
+
+  import_key https://jenkins-ci.org/redhat/jenkins-ci.org.key
+
+  URL='http://pkg.jenkins-ci.org/redhat-stable/jenkins.repo'
+  LOC="/etc/yum.repos.d/$(basename $URL)"
+  download_file $URL $LOC
+
+}
+
+function repo_mysql () {
+
+  mysql='http://dev.mysql.com/get/mysql-community-release-el7-5.noarch.rpm'
+  install_rpm $mysql
+
+}
+
+# For now, we're just going to install everything by default.
+for repo in $(grep '^function repo_' $0 | cut -d ' ' -f 2); do
+
+  $repo
+
+done
