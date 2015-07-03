@@ -308,6 +308,17 @@ function repo_mysql {
 
 }
 
+function repo_cityfan {
+
+  import_key http://www.city-fan.org/ftp/contrib/yum-repo/CITY-FAN.ORG-GPG-KEY
+
+  # How do I tell whether fc$releasever or rhel$releasever is needed here?
+
+  URL='http://www.city-fan.org/ftp/contrib/yum-repo/city-fan.org-release-1-12.rhel7.noarch.rpm'
+  install_rpm $URL
+
+}
+
 PARSED=$($GETOPT $GETOPT_PARM -- "$@")
 eval set -- "${PARSED}"
 
